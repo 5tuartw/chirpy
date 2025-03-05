@@ -14,6 +14,8 @@ func main() {
 	// Define FileServer as handler
 	mux.Handle("/", http.FileServer(http.Dir(filepathRoot)))
 
+	//mux.Handle("/assets/", http.FileServer(http.Dir(filepathRoot+"/assets")))
+
 	// Initialise the http.Server
 	server := &http.Server{
 		Addr:    ":" + port,
