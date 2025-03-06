@@ -12,9 +12,10 @@ func main() {
 
 	mux := http.NewServeMux()
 	// Define FileServer as handler
-	mux.Handle("/", http.FileServer(http.Dir(filepathRoot)))
+	mux.Handle("/app/", http.StripPrefix("/app", http.FileServer(http.Dir(filepathRoot))))
 
-	//mux.Handle("/assets/", http.FileServer(http.Dir(filepathRoot+"/assets")))
+	// Register a handler for a readiness endpoint
+	mux.HandleFunc("/healthz", readinessHandler)
 
 	// Initialise the http.Server
 	server := &http.Server{
@@ -27,4 +28,10 @@ func main() {
 	if err := server.ListenAndServe(); err != nil {
 		log.Println("Serverfailed:", err)
 	}
+}
+
+func readinessHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte("OK"))
 }
