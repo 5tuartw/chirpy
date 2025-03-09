@@ -3,6 +3,7 @@ package main
 import (
 	//"fmt"
 	//"fmt"
+	"encoding/json"
 	"html/template"
 	"log"
 	"net/http"
@@ -19,7 +20,6 @@ func main() {
 	// Define FileServer as handler
 	mux.Handle("/app/", apiCfg.middlewareMetricsInc(http.StripPrefix("/app", http.FileServer(http.Dir(filepathRoot)))))
 
-
 	// Register a handler for a readiness endpoint
 	mux.HandleFunc("GET /api/healthz", readinessHandler)
 
@@ -28,6 +28,9 @@ func main() {
 
 	// Register a handler for hitcount reset
 	mux.HandleFunc("POST /admin/reset", apiCfg.resetHitsHandler)
+
+	// Register a handler for validate_chirpy
+	mux.HandleFunc("POST /api/validate_chirp", apiCfg.validateReqHandler)
 
 	// Initialise the http.Server
 	server := &http.Server{
@@ -96,4 +99,63 @@ func (c *apiConfig) resetHitsHandler(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.Write([]byte(responseText))
+}
+
+func (c *apiConfig) validateReqHandler(w http.ResponseWriter, r *http.Request) {
+	type parameters struct {
+		Body string `json:"body"`
+	}
+	type errorResponse struct {
+		Error string `json:"error"`
+	}
+	type validResponse struct {
+		Valid bool `json:"valid"`
+	}
+
+	decoder := json.NewDecoder(r.Body)
+	params := parameters{}
+	err := decoder.Decode(&params)
+
+	w.Header().Set("Content-Type", "application/json")
+
+	if err != nil {
+		log.Printf("Error decoding parameters: %s", err)
+		errorBody := errorResponse{Error: "Something went wrong decoding parameters"}
+		dat, err := json.Marshal(errorBody)
+		if err != nil {
+			log.Printf("Error marshalling JSON: %s", err)
+			w.WriteHeader(500)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(500)
+		w.Write(dat)
+		return
+	}
+	if len(params.Body) > 140 {
+		errorBody := errorResponse{Error: "Chirp is too long"}
+		dat, err := json.Marshal(errorBody)
+		if err != nil {
+			w.WriteHeader(500)
+			log.Printf("Error marshalling JSON: %s", err)
+			return
+		}
+		w.WriteHeader(400)
+		w.Write(dat)
+		return
+	}
+
+	respBody := validResponse{Valid: true}
+	dat, err := json.Marshal(respBody)
+	if err != nil {
+		w.WriteHeader(500)
+		log.Printf("Error marshalling JSON: %s", err)
+		return
+	}
+	w.WriteHeader(200)
+	w.Write(dat)
+}
+
+func (c *apiConfig) validateRespHandler(w http.ResponseWriter, r *http.Request) {
+
 }
