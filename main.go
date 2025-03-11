@@ -1,20 +1,36 @@
 package main
 
 import (
-	//"fmt"
-	//"fmt"
+	"database/sql"
 	"encoding/json"
 	"html/template"
 	"log"
 	"net/http"
 	"os"
+	"strings"
 	"sync/atomic"
+
+	"github.com/5tuartw/chirpy/internal/database"
+	"github.com/joho/godotenv"
+	_ "github.com/lib/pq"
 )
 
+//"fmt"
+
 func main() {
+	godotenv.Load()
+	dbURL := os.Getenv("DB_URL")
 	const filepathRoot = "."
 	const port = "8080"
 	var apiCfg apiConfig
+
+	db, err := sql.Open("postgres", dbURL)
+	if err != nil {
+		log.Println("Error opening datacase:", err)
+	}
+	dbQueries := database.New(db)
+
+	apiCfg.DB = dbQueries
 
 	mux := http.NewServeMux()
 	// Define FileServer as handler
@@ -53,6 +69,7 @@ func readinessHandler(w http.ResponseWriter, r *http.Request) {
 
 type apiConfig struct {
 	fileserverHits atomic.Int32
+	DB             *database.Queries
 }
 
 func (c *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
@@ -102,60 +119,77 @@ func (c *apiConfig) resetHitsHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (c *apiConfig) validateReqHandler(w http.ResponseWriter, r *http.Request) {
-	type parameters struct {
+	var requestBody struct {
 		Body string `json:"body"`
-	}
-	type errorResponse struct {
-		Error string `json:"error"`
-	}
-	type validResponse struct {
-		Valid bool `json:"valid"`
 	}
 
 	decoder := json.NewDecoder(r.Body)
-	params := parameters{}
-	err := decoder.Decode(&params)
+	err := decoder.Decode(&requestBody)
+	if err != nil {
+		respondWithError(w, http.StatusBadRequest, "Something went wrong decoding parameters")
+		return
+	}
+
+	if len(requestBody.Body) > 140 {
+		respondWithError(w, http.StatusBadRequest, "Chirp is too long")
+		return
+	}
+
+	cleanedBody := cleanUpChirp(requestBody.Body)
+	response := struct {
+		CleanedBody string `json:"cleaned_body"`
+	}{
+		CleanedBody: cleanedBody,
+	}
+
+	respondWithJSON(w, http.StatusOK, response)
+}
+
+func respondWithError(w http.ResponseWriter, code int, msg string) {
+	type errorResponse struct {
+		Error string `json:"error"`
+	}
+	errorBody := errorResponse{Error: msg}
+	dat, err := json.Marshal(errorBody)
+	if err != nil {
+		log.Printf("Error marshalling JSON: %s", err)
+		w.WriteHeader(500)
+		return
+	}
 
 	w.Header().Set("Content-Type", "application/json")
-
-	if err != nil {
-		log.Printf("Error decoding parameters: %s", err)
-		errorBody := errorResponse{Error: "Something went wrong decoding parameters"}
-		dat, err := json.Marshal(errorBody)
-		if err != nil {
-			log.Printf("Error marshalling JSON: %s", err)
-			w.WriteHeader(500)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(500)
-		w.Write(dat)
-		return
-	}
-	if len(params.Body) > 140 {
-		errorBody := errorResponse{Error: "Chirp is too long"}
-		dat, err := json.Marshal(errorBody)
-		if err != nil {
-			w.WriteHeader(500)
-			log.Printf("Error marshalling JSON: %s", err)
-			return
-		}
-		w.WriteHeader(400)
-		w.Write(dat)
-		return
-	}
-
-	respBody := validResponse{Valid: true}
-	dat, err := json.Marshal(respBody)
-	if err != nil {
-		w.WriteHeader(500)
-		log.Printf("Error marshalling JSON: %s", err)
-		return
-	}
-	w.WriteHeader(200)
+	w.WriteHeader(code)
 	w.Write(dat)
 }
 
-func (c *apiConfig) validateRespHandler(w http.ResponseWriter, r *http.Request) {
+func respondWithJSON(w http.ResponseWriter, code int, payload interface{}) {
+	dat, err := json.Marshal(payload)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Internal Server Error")
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	w.Write(dat)
 
+}
+
+func cleanUpChirp(msg string) string {
+	profanities := map[string]bool{
+		"kerfuffle": true,
+		"sharbert":  true,
+		"fornax":    true,
+	}
+
+	// split the message into words
+	msgWords := strings.Fields(msg)
+
+	for i, word := range msgWords {
+		lowercase := strings.ToLower(word)
+		if profanities[lowercase] {
+			msgWords[i] = "****"
+		}
+	}
+
+	return strings.Join(msgWords, " ")
 }
