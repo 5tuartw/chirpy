@@ -9,8 +9,10 @@ import (
 	"os"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"github.com/5tuartw/chirpy/internal/database"
+	"github.com/google/uuid"
 	"github.com/joho/godotenv"
 	_ "github.com/lib/pq"
 )
@@ -23,6 +25,11 @@ func main() {
 	const filepathRoot = "."
 	const port = "8080"
 	var apiCfg apiConfig
+	if os.Getenv("PLATFORM") == "dev" {
+		apiCfg.isDev = true
+	} else {
+		apiCfg.isDev = false
+	}
 
 	db, err := sql.Open("postgres", dbURL)
 	if err != nil {
@@ -43,10 +50,16 @@ func main() {
 	mux.HandleFunc("GET /admin/metrics", apiCfg.hitcountHandler)
 
 	// Register a handler for hitcount reset
-	mux.HandleFunc("POST /admin/reset", apiCfg.resetHitsHandler)
+	//mux.HandleFunc("POST /admin/reset", apiCfg.resetHitsHandler)
 
 	// Register a handler for validate_chirpy
 	mux.HandleFunc("POST /api/validate_chirp", apiCfg.validateReqHandler)
+
+	// Register a handler for creating users
+	mux.HandleFunc("POST /api/users", apiCfg.createUser)
+
+	// Register a handler for resetting users
+	mux.HandleFunc("POST /admin/reset", apiCfg.resetAllUsers)
 
 	// Initialise the http.Server
 	server := &http.Server{
@@ -70,6 +83,7 @@ func readinessHandler(w http.ResponseWriter, r *http.Request) {
 type apiConfig struct {
 	fileserverHits atomic.Int32
 	DB             *database.Queries
+	isDev          bool
 }
 
 func (c *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
@@ -192,4 +206,59 @@ func cleanUpChirp(msg string) string {
 	}
 
 	return strings.Join(msgWords, " ")
+}
+
+type User struct {
+	ID        uuid.UUID `json:"id"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+	Email     string    `json:"email"`
+}
+
+func (c *apiConfig) createUser(w http.ResponseWriter, r *http.Request) {
+	var requestBody struct {
+		Email string `json:"email"`
+	}
+
+	decoder := json.NewDecoder(r.Body)
+	defer r.Body.Close()
+	err := decoder.Decode(&requestBody)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Error decoding json data")
+		return
+	}
+
+	user, err := c.DB.CreateUser(r.Context(), requestBody.Email)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Error adding user to database")
+		return
+	}
+
+	userData := User{
+		ID:        user.ID,
+		CreatedAt: user.CreatedAt,
+		UpdatedAt: user.UpdatedAt,
+		Email:     user.Email,
+	}
+
+	respondWithJSON(w, 201, userData)
+
+}
+
+func (c *apiConfig) resetAllUsers(w http.ResponseWriter, r *http.Request) {
+	if !c.isDev {
+		respondWithError(w, 403, "Forbidden database action")
+		return
+	}
+
+	err := c.DB.DeleteAllUsers(r.Context())
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Error resetting users")
+		return
+	}
+
+	type response struct {
+		Message string `json:"message"`
+	}
+	respondWithJSON(w, 200, response{Message: "Users table has been reset"})
 }
