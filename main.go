@@ -50,16 +50,19 @@ func main() {
 	mux.HandleFunc("GET /admin/metrics", apiCfg.hitcountHandler)
 
 	// Register a handler for hitcount reset
-	//mux.HandleFunc("POST /admin/reset", apiCfg.resetHitsHandler)
+	mux.HandleFunc("POST /admin/resethits", apiCfg.resetHitsHandler)
 
 	// Register a handler for validate_chirpy
-	mux.HandleFunc("POST /api/validate_chirp", apiCfg.validateReqHandler)
+	//mux.HandleFunc("POST /api/validate_chirp", apiCfg.validateReqHandler) // functionality moved to addChirp
 
 	// Register a handler for creating users
 	mux.HandleFunc("POST /api/users", apiCfg.createUser)
 
 	// Register a handler for resetting users
 	mux.HandleFunc("POST /admin/reset", apiCfg.resetAllUsers)
+
+	// Registers a handler for creating Chirps
+	mux.HandleFunc("POST /api/chirps", apiCfg.addChirp)
 
 	// Initialise the http.Server
 	server := &http.Server{
@@ -132,9 +135,18 @@ func (c *apiConfig) resetHitsHandler(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte(responseText))
 }
 
-func (c *apiConfig) validateReqHandler(w http.ResponseWriter, r *http.Request) {
+type Chirp struct {
+	ID        uuid.UUID `json:"id"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+	Body      string    `json:"body"`
+	UserID    uuid.UUID `json:"user_id"`
+}
+
+func (c *apiConfig) addChirp(w http.ResponseWriter, r *http.Request) {
 	var requestBody struct {
-		Body string `json:"body"`
+		Body   string    `json:"body"`
+		UserID uuid.UUID `json:"user_id"`
 	}
 
 	decoder := json.NewDecoder(r.Body)
@@ -150,13 +162,27 @@ func (c *apiConfig) validateReqHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	cleanedBody := cleanUpChirp(requestBody.Body)
-	response := struct {
-		CleanedBody string `json:"cleaned_body"`
-	}{
-		CleanedBody: cleanedBody,
+
+	chirp, err := c.DB.CreateChirp(r.Context(), database.CreateChirpParams{
+		Body:   cleanedBody,
+		UserID: requestBody.UserID,
+	})
+
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Could not create chirp")
+		return
 	}
 
-	respondWithJSON(w, http.StatusOK, response)
+	formattedChirp := Chirp{
+		ID:        chirp.ID,
+		Body:      chirp.Body,
+		UserID:    chirp.UserID,
+		CreatedAt: chirp.CreatedAt,
+		UpdatedAt: chirp.UpdatedAt,
+	}
+
+	respondWithJSON(w, 201, formattedChirp)
+
 }
 
 func respondWithError(w http.ResponseWriter, code int, msg string) {
