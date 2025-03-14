@@ -64,6 +64,9 @@ func main() {
 	// Registers a handler for creating Chirps
 	mux.HandleFunc("POST /api/chirps", apiCfg.addChirp)
 
+	// Reigster a handler to get all Chirps
+	mux.HandleFunc("GET /api/chirps", apiCfg.getChirps)
+
 	// Initialise the http.Server
 	server := &http.Server{
 		Addr:    ":" + port,
@@ -173,6 +176,13 @@ func (c *apiConfig) addChirp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	formattedChirp := formatChirp(chirp)
+
+	respondWithJSON(w, 201, formattedChirp)
+
+}
+
+func formatChirp(chirp database.Chirp) Chirp {
 	formattedChirp := Chirp{
 		ID:        chirp.ID,
 		Body:      chirp.Body,
@@ -180,9 +190,7 @@ func (c *apiConfig) addChirp(w http.ResponseWriter, r *http.Request) {
 		CreatedAt: chirp.CreatedAt,
 		UpdatedAt: chirp.UpdatedAt,
 	}
-
-	respondWithJSON(w, 201, formattedChirp)
-
+	return formattedChirp
 }
 
 func respondWithError(w http.ResponseWriter, code int, msg string) {
@@ -287,4 +295,19 @@ func (c *apiConfig) resetAllUsers(w http.ResponseWriter, r *http.Request) {
 		Message string `json:"message"`
 	}
 	respondWithJSON(w, 200, response{Message: "Users table has been reset"})
+}
+
+func (c *apiConfig) getChirps(w http.ResponseWriter, r *http.Request) {
+
+	chirps, err := c.DB.GetChirps(r.Context())
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Could not fetch Chirps")
+		return
+	}
+
+	allChirps := []Chirp{}
+	for _, chirp := range chirps {
+		allChirps = append(allChirps, formatChirp(chirp))
+	}
+	respondWithJSON(w, 200, allChirps)
 }
