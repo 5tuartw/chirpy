@@ -11,6 +11,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/5tuartw/chirpy/internal/auth"
+
 	"github.com/5tuartw/chirpy/internal/database"
 	"github.com/google/uuid"
 	"github.com/joho/godotenv"
@@ -30,6 +32,7 @@ func main() {
 	} else {
 		apiCfg.isDev = false
 	}
+	apiCfg.JWTSecret = os.Getenv("JWT_SECRET")
 
 	db, err := sql.Open("postgres", dbURL)
 	if err != nil {
@@ -67,6 +70,12 @@ func main() {
 	// Reigster a handler to get all Chirps
 	mux.HandleFunc("GET /api/chirps", apiCfg.getChirps)
 
+	// Get specific Chirp
+	mux.HandleFunc("GET /api/chirps/{chirpID}", apiCfg.getChirp)
+
+	// Handle logins
+	mux.HandleFunc("POST /api/login", apiCfg.login)
+
 	// Initialise the http.Server
 	server := &http.Server{
 		Addr:    ":" + port,
@@ -90,6 +99,7 @@ type apiConfig struct {
 	fileserverHits atomic.Int32
 	DB             *database.Queries
 	isDev          bool
+	JWTSecret      string
 }
 
 func (c *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
@@ -148,14 +158,25 @@ type Chirp struct {
 
 func (c *apiConfig) addChirp(w http.ResponseWriter, r *http.Request) {
 	var requestBody struct {
-		Body   string    `json:"body"`
-		UserID uuid.UUID `json:"user_id"`
+		Body string `json:"body"`
 	}
 
 	decoder := json.NewDecoder(r.Body)
 	err := decoder.Decode(&requestBody)
 	if err != nil {
 		respondWithError(w, http.StatusBadRequest, "Something went wrong decoding parameters")
+		return
+	}
+
+	token, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		respondWithError(w, 401, "Unauthorized, cannot get token")
+		return
+	}
+
+	tokenUserID, err := auth.ValidateJWT(token, c.JWTSecret)
+	if err != nil {
+		respondWithError(w, 401, "Unauthorized, cannot validate: "+err.Error())
 		return
 	}
 
@@ -168,7 +189,7 @@ func (c *apiConfig) addChirp(w http.ResponseWriter, r *http.Request) {
 
 	chirp, err := c.DB.CreateChirp(r.Context(), database.CreateChirpParams{
 		Body:   cleanedBody,
-		UserID: requestBody.UserID,
+		UserID: tokenUserID,
 	})
 
 	if err != nil {
@@ -251,7 +272,8 @@ type User struct {
 
 func (c *apiConfig) createUser(w http.ResponseWriter, r *http.Request) {
 	var requestBody struct {
-		Email string `json:"email"`
+		Email    string `json:"email"`
+		Password string `json:"password"`
 	}
 
 	decoder := json.NewDecoder(r.Body)
@@ -262,7 +284,27 @@ func (c *apiConfig) createUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	user, err := c.DB.CreateUser(r.Context(), requestBody.Email)
+	if requestBody.Email == "" {
+		respondWithError(w, http.StatusBadRequest, "Email is required")
+		return
+	}
+
+	if requestBody.Password == "" {
+		respondWithError(w, http.StatusBadRequest, "Password is required")
+		return
+	}
+
+	hashedPword, err := auth.HashPassword(requestBody.Password)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Could not create hashed password")
+		return
+	}
+
+	user, err := c.DB.CreateUser(r.Context(), database.CreateUserParams{
+		Email:          requestBody.Email,
+		HashedPassword: string(hashedPword),
+	})
+
 	if err != nil {
 		respondWithError(w, http.StatusInternalServerError, "Error adding user to database")
 		return
@@ -310,4 +352,93 @@ func (c *apiConfig) getChirps(w http.ResponseWriter, r *http.Request) {
 		allChirps = append(allChirps, formatChirp(chirp))
 	}
 	respondWithJSON(w, 200, allChirps)
+}
+
+func (c *apiConfig) getChirp(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(r.PathValue("chirpID"))
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Could not parse Chirp ID")
+		return
+	}
+	chirp, err := c.DB.GetChirp(r.Context(), id)
+	if err != nil {
+		respondWithError(w, 404, "Unable to fetch Chirp")
+		return
+	}
+	respondWithJSON(w, 200, formatChirp(chirp))
+}
+
+type TokenUser struct {
+	ID        uuid.UUID `json:"id"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+	Email     string    `json:"email"`
+	Token     string    `json:"token"`
+}
+
+func (c *apiConfig) login(w http.ResponseWriter, r *http.Request) {
+	var requestBody struct {
+		Email            string `json:"email"`
+		Password         string `json:"password"`
+		ExpiresInSeconds int64  `json:"expires_in_seconds,omitempty"`
+	}
+
+	decoder := json.NewDecoder(r.Body)
+	defer r.Body.Close()
+	err := decoder.Decode(&requestBody)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Error decoding json data")
+		return
+	}
+
+	if requestBody.Email == "" {
+		respondWithError(w, http.StatusBadRequest, "Email is required")
+		return
+	}
+
+	if requestBody.Password == "" {
+		respondWithError(w, http.StatusBadRequest, "Password is required")
+		return
+	}
+
+	var tokenExpiresInSeconds int64
+	const oneHourInSeconds int64 = 3600
+	if requestBody.ExpiresInSeconds != 0 {
+		// Ensure we don't exceed the 1 hour limit
+		if requestBody.ExpiresInSeconds > oneHourInSeconds {
+			tokenExpiresInSeconds = oneHourInSeconds
+		} else {
+			tokenExpiresInSeconds = requestBody.ExpiresInSeconds
+		}
+	} else {
+		tokenExpiresInSeconds = oneHourInSeconds // Default to 1 hour
+	}
+
+	user, err := c.DB.GetUserByEmail(r.Context(), requestBody.Email)
+	if err != nil {
+		respondWithError(w, http.StatusUnauthorized, "Incorrect email or password")
+		return
+	}
+	err = auth.CheckPasswordHash(requestBody.Password, user.HashedPassword)
+	if err != nil {
+		respondWithError(w, http.StatusUnauthorized, "Incorrect email or password")
+		return
+	}
+
+	token, err := auth.MakeJWT(user.ID, c.JWTSecret, time.Duration(tokenExpiresInSeconds)*time.Second)
+	if err != nil {
+		respondWithError(w, http.StatusBadRequest, "could not create token")
+		return
+	}
+
+	userData := TokenUser{
+		ID:        user.ID,
+		CreatedAt: user.CreatedAt,
+		UpdatedAt: user.UpdatedAt,
+		Email:     user.Email,
+		Token:     token,
+	}
+
+	respondWithJSON(w, 200, userData)
+
 }
