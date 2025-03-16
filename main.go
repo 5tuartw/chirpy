@@ -76,6 +76,12 @@ func main() {
 	// Handle logins
 	mux.HandleFunc("POST /api/login", apiCfg.login)
 
+	// Refresh token
+	mux.HandleFunc("POST /api/refresh", apiCfg.refresh)
+
+	// Revoke token
+	mux.HandleFunc("POST /api/revoke", apiCfg.revoke)
+
 	// Initialise the http.Server
 	server := &http.Server{
 		Addr:    ":" + port,
@@ -369,18 +375,18 @@ func (c *apiConfig) getChirp(w http.ResponseWriter, r *http.Request) {
 }
 
 type TokenUser struct {
-	ID        uuid.UUID `json:"id"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
-	Email     string    `json:"email"`
-	Token     string    `json:"token"`
+	ID           uuid.UUID `json:"id"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
+	Email        string    `json:"email"`
+	Token        string    `json:"token"`
+	RefreshToken string    `json:"refresh_token"`
 }
 
 func (c *apiConfig) login(w http.ResponseWriter, r *http.Request) {
 	var requestBody struct {
-		Email            string `json:"email"`
-		Password         string `json:"password"`
-		ExpiresInSeconds int64  `json:"expires_in_seconds,omitempty"`
+		Email    string `json:"email"`
+		Password string `json:"password"`
 	}
 
 	decoder := json.NewDecoder(r.Body)
@@ -401,18 +407,7 @@ func (c *apiConfig) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var tokenExpiresInSeconds int64
 	const oneHourInSeconds int64 = 3600
-	if requestBody.ExpiresInSeconds != 0 {
-		// Ensure we don't exceed the 1 hour limit
-		if requestBody.ExpiresInSeconds > oneHourInSeconds {
-			tokenExpiresInSeconds = oneHourInSeconds
-		} else {
-			tokenExpiresInSeconds = requestBody.ExpiresInSeconds
-		}
-	} else {
-		tokenExpiresInSeconds = oneHourInSeconds // Default to 1 hour
-	}
 
 	user, err := c.DB.GetUserByEmail(r.Context(), requestBody.Email)
 	if err != nil {
@@ -425,20 +420,110 @@ func (c *apiConfig) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	token, err := auth.MakeJWT(user.ID, c.JWTSecret, time.Duration(tokenExpiresInSeconds)*time.Second)
+	token, err := auth.MakeJWT(user.ID, c.JWTSecret, time.Duration(oneHourInSeconds)*time.Second)
 	if err != nil {
-		respondWithError(w, http.StatusBadRequest, "could not create token")
+		respondWithError(w, http.StatusBadRequest, "could not create access token")
 		return
 	}
 
+	refreshToken, err := auth.MakeRefreshToken()
+	if err != nil {
+		respondWithError(w, http.StatusBadRequest, "could not create refresh token")
+		return
+	}
+	sixtyDaysInSeconds := 60 * 60 * 24 * 60
+	expiry := time.Now().Add(time.Duration(sixtyDaysInSeconds) * time.Second)
+	rToken, err := c.DB.CreateRefreshToken(r.Context(), database.CreateRefreshTokenParams{
+		Token:     refreshToken,
+		UserID:    user.ID,
+		ExpiresAt: expiry,
+	})
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "could not add new token to database")
+		return
+	}
+
+	thisRToken := rToken.Token
+
 	userData := TokenUser{
-		ID:        user.ID,
-		CreatedAt: user.CreatedAt,
-		UpdatedAt: user.UpdatedAt,
-		Email:     user.Email,
-		Token:     token,
+		ID:           user.ID,
+		CreatedAt:    user.CreatedAt,
+		UpdatedAt:    user.UpdatedAt,
+		Email:        user.Email,
+		Token:        token,
+		RefreshToken: thisRToken,
 	}
 
 	respondWithJSON(w, 200, userData)
 
+}
+
+func (c *apiConfig) refresh(w http.ResponseWriter, r *http.Request) {
+	var responseBody struct {
+		Token string `json:"token"`
+	}
+
+	token, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		respondWithError(w, 401, "Unauthorized, cannot get token")
+		return
+	}
+
+	rToken, err := c.DB.GetRefreshToken(r.Context(), token)
+	if err != nil {
+		respondWithError(w, 401, "No valid token found")
+		return
+	}
+
+	// Check if token is expired
+	if time.Now().After(rToken.ExpiresAt) {
+		respondWithError(w, 401, "Token expired")
+		return
+	}
+
+	// Check if token is revoked
+	if rToken.RevokedAt.Valid {
+		respondWithError(w, 401, "Token revoked")
+		return
+	}
+
+	const oneHourInSeconds int64 = 3600
+	accessToken, err := auth.MakeJWT(rToken.UserID, c.JWTSecret, time.Duration(oneHourInSeconds)*time.Second)
+	if err != nil {
+		respondWithError(w, http.StatusBadRequest, "could not create access token")
+		return
+	}
+
+	responseBody.Token = accessToken
+	respondWithJSON(w, 200, responseBody)
+}
+
+func (c *apiConfig) revoke(w http.ResponseWriter, r *http.Request) {
+	token, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		respondWithError(w, 401, "Unauthorized, cannot get token")
+		return
+	}
+	
+	// Check if the token exists first
+	rToken, err := c.DB.GetRefreshToken(r.Context(), token)
+	if err != nil {
+		respondWithError(w, 401, "No valid token found")
+		return
+	}
+
+	// Check if token is already revoked
+	if rToken.RevokedAt.Valid {
+		respondWithError(w, 400, "Token already revoked")
+		return
+	}
+
+	// Now attempt to revoke the token
+	err = c.DB.RevokeToken(r.Context(), token)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "could not revoke token")
+		return
+	}
+
+	w.WriteHeader(204)
 }
