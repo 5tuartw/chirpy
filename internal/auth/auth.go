@@ -24,7 +24,7 @@ func CheckPasswordHash(password, hash string) error {
 }
 
 func MakeJWT(userID uuid.UUID, tokenSecret string, expiresIn time.Duration) (string, error) {
-	
+
 	// Create the token with standard claims
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.RegisteredClaims{
 		Issuer:    "chirpy",
@@ -75,6 +75,18 @@ func GetBearerToken(headers http.Header) (string, error) {
 		return "", fmt.Errorf("authorization header format must be 'Bearer {token}'")
 	}
 
+	return parts[1], nil
+}
+
+func GetAPIKey(headers http.Header) (string, error) {
+	authHeader := headers.Get("Authorization")
+	if authHeader == "" {
+		return "", fmt.Errorf("no authorization header")
+	}
+	parts := strings.Split(authHeader, " ")
+	if len(parts) != 2 || parts[0] != "ApiKey" || parts[1] == "" {
+		return "", fmt.Errorf("authorization header format must be 'ApiKey {api_key}'")
+	}
 	return parts[1], nil
 }
 
